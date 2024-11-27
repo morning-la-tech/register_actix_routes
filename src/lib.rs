@@ -1,5 +1,5 @@
 extern crate proc_macro;
-
+extern crate tabled;
 use once_cell::sync::Lazy;
 use proc_macro::TokenStream;
 use quote::quote;
