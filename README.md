@@ -32,8 +32,8 @@ Add the `register_routes` crate to your project:
 
 ```toml
 [dependencies]
-register_routes = "0.1.0"
-tabled = "0.6"  # Required for route listing
+register_routes = "0.1.1"
+tabled = "0.17.0" # Required for route listing
 ```
 
 ---
