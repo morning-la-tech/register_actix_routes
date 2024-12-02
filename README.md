@@ -1,4 +1,4 @@
-# `register_routes` - A Proc Macro for Dynamic Route Registration in Actix Web
+# `register_actix_routes` - A Proc Macro for Dynamic Route Registration in Actix Web
 
 `register_routes` is a Rust proc macro library designed to simplify the registration of routes in an Actix Web application. It enables automatic grouping and configuration of routes, reducing boilerplate code while maintaining scalability and clarity in route management.
 
