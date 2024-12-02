@@ -1,7 +1,9 @@
 [package]
 edition = "2021"
-name    = "register_routes"
+name    = "register-actix-routes"
 version = "0.1.1"
+license = "MIT"
+description = "Macro designed to simplify the registration of routes in an Actix Web application"
 
 [dependencies]
 once_cell   = "1.20.2"
