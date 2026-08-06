@@ -149,47 +149,54 @@ fn parse_register_service_args(args: &syn::ExprArray) -> syn::Result<(String, bo
     Ok((module_key, use_scope))
 }
 
-/// Builds the `cfg.service(...)` block for one module, merging every handler that shares the
-/// same (prefix, path) pair into a single named `actix_web::web::resource(...)` with one
-/// `.route()` per HTTP verb.
+/// Turns an HTTP verb ("GET", "POST", ...) into the matching PascalCase identifier used by
+/// `actix_web::guard` (`Get`, `Post`, ...).
+fn verb_guard_ident(verb: &str) -> String {
+    let mut chars = verb.chars();
+    match chars.next() {
+        Some(first) => first.to_string() + &chars.as_str().to_lowercase(),
+        None => String::new(),
+    }
+}
+
+/// Builds the `cfg.service(...)` block for one module.
 ///
-/// This is what prevents Actix's `HttpRequest::match_name()` from reporting the wrong handler
-/// name: Actix's resource tree resolves names purely by URL path, ignoring the HTTP method, so
-/// two handlers registered as separate services under the same path (e.g. `#[get("")]` and
-/// `#[post("")]`) would make the one registered first "win" the name for every method hitting
-/// that path. Merging them into one resource means there is only ever one name per path.
+/// Every handler is registered as its own `actix_web::web::resource(...)`, guarded by its HTTP
+/// verb (`.guard(actix_web::guard::Get())`, etc.) — mirroring exactly what
+/// `actix-web-codegen`'s own `#[get(...)]`/`#[post(...)]` macros generate — but with an explicit
+/// `.name(...)` qualified by prefix and path, so handlers sharing a path all report the same
+/// name instead of whichever bare function name Actix happened to register first for it.
+///
+/// Handlers are emitted in the exact order they were declared (`registrations`'s own order,
+/// straight from `REGISTRATION_MAP` — no grouping or reordering by path). This matters for two
+/// separate reasons, both about Actix trying registered nodes in registration order and
+/// stopping at the first one whose path *and* guard both match:
+///
+/// - `.guard()` (rather than merging same-path handlers into one resource with multiple
+///   `.route()`s) keeps a guard mismatch a full non-match for that node, so Actix falls through
+///   to try the next one — e.g. a literal `/batch/...` after an unrelated `/{id}/...` that
+///   only *coincidentally* matches the same path but not the request's verb.
+/// - Preserving declaration order (rather than grouping handlers by path, which would move a
+///   path's *first-declared* verb's position to cover every verb registered under it) keeps a
+///   more specific static path — like `/me` declared before `/{uuid}` for the same verb, PUT —
+///   ahead of the dynamic one that would otherwise swallow it first.
 fn build_scope_service_tokens(
     registrations: Vec<RouteInfo>,
     prefix: &str,
     use_scope: bool,
 ) -> proc_macro2::TokenStream {
-    let mut path_order: Vec<String> = Vec::new();
-    let mut grouped_by_path: HashMap<String, Vec<RouteInfo>> = HashMap::new();
-    for route in registrations {
-        if !grouped_by_path.contains_key(&route.path) {
-            path_order.push(route.path.clone());
-        }
-        grouped_by_path.entry(route.path.clone()).or_default().push(route);
-    }
-
-    let resource_blocks = path_order.into_iter().map(|path| {
-        let routes = grouped_by_path.remove(&path).unwrap_or_default();
-        let resource_name = format!("{prefix}{path}");
-        let path_literal = LitStr::new(&path, Span::call_site());
+    let resource_blocks = registrations.iter().map(|route| {
+        let resource_name = format!("{prefix}{}", route.path);
+        let path_literal = LitStr::new(&route.path, Span::call_site());
         let name_literal = LitStr::new(&resource_name, Span::call_site());
-
-        let route_calls = routes.iter().map(|route| {
-            let fn_ident = syn::Ident::new(&route.handler_name, Span::call_site());
-            let verb_ident = syn::Ident::new(&route.verb.to_lowercase(), Span::call_site());
-            quote! {
-                .route(actix_web::web::#verb_ident().to(#fn_ident))
-            }
-        });
+        let fn_ident = syn::Ident::new(&route.handler_name, Span::call_site());
+        let guard_ident = syn::Ident::new(&verb_guard_ident(&route.verb), Span::call_site());
 
         quote! {
             actix_web::web::resource(#path_literal)
                 .name(#name_literal)
-                #(#route_calls)*
+                .guard(actix_web::guard::#guard_ident())
+                .to(#fn_ident)
         }
     });
 
@@ -674,7 +681,7 @@ mod tests {
         }
 
         #[test]
-        fn distinct_paths_get_one_resource_each() {
+        fn distinct_paths_get_one_guarded_resource_each() {
             let routes = vec![
                 route("/equipments", "find", "", "GET"),
                 route("/equipments", "find_one", "/{uuid}", "GET"),
@@ -688,12 +695,14 @@ mod tests {
                         .service(
                             actix_web::web::resource("")
                                 .name("/equipments")
-                                .route(actix_web::web::get().to(find))
+                                .guard(actix_web::guard::Get())
+                                .to(find)
                         )
                         .service(
                             actix_web::web::resource("/{uuid}")
                                 .name("/equipments/{uuid}")
-                                .route(actix_web::web::get().to(find_one))
+                                .guard(actix_web::guard::Get())
+                                .to(find_one)
                         )
                 );
             };
@@ -702,12 +711,18 @@ mod tests {
         }
 
         #[test]
-        fn handlers_sharing_a_path_are_merged_into_one_named_resource() {
-            // This is the regression test for the bug where actix's `match_name()` reported
-            // the wrong handler: `create` (POST) and `find` (GET) both live at the same path,
-            // so they must end up as two `.route()` calls on a *single* named resource instead
-            // of two separate services (which is what let the first-registered one "win" the
-            // name for every HTTP method on that path).
+        fn handlers_sharing_a_path_become_separate_guarded_resources_with_the_same_name() {
+            // Regression test for two distinct bugs:
+            // 1. actix's `match_name()` used to report whichever bare function name was
+            //    registered first for a shared path, for every HTTP method hitting it — fixed
+            //    by giving every handler on the same path the same qualified `.name(...)`.
+            // 2. Merging them into `.route()`s on a single resource fixed (1) but broke
+            //    fallthrough to sibling resources whose path pattern only *coincidentally*
+            //    matches (e.g. a dynamic `/{id}/...` swallowing a literal `/batch/...`) — a
+            //    `.route()`-based resource commits to the node once its path matches and
+            //    returns 405 instead of trying the next sibling. `.guard()` keeps each handler
+            //    as its own resource, so a guard mismatch is a full non-match, preserving the
+            //    fallthrough exactly like actix-web-codegen's own `#[get]`/`#[post]` macros do.
             let routes = vec![
                 route("/equipments", "create", "", "POST"),
                 route("/equipments", "find", "", "GET"),
@@ -721,8 +736,14 @@ mod tests {
                         .service(
                             actix_web::web::resource("")
                                 .name("/equipments")
-                                .route(actix_web::web::post().to(create))
-                                .route(actix_web::web::get().to(find))
+                                .guard(actix_web::guard::Post())
+                                .to(create)
+                        )
+                        .service(
+                            actix_web::web::resource("")
+                                .name("/equipments")
+                                .guard(actix_web::guard::Get())
+                                .to(find)
                         )
                 );
             };
@@ -741,6 +762,24 @@ mod tests {
         }
 
         #[test]
+        fn every_supported_verb_maps_to_its_pascal_case_guard() {
+            for (verb, guard) in [
+                ("GET", "Get"),
+                ("POST", "Post"),
+                ("PUT", "Put"),
+                ("DELETE", "Delete"),
+                ("PATCH", "Patch"),
+            ] {
+                let routes = vec![route("/x", "handler", "", verb)];
+                let tokens = build_scope_service_tokens(routes, "/x", true);
+                assert!(
+                    tokens.to_string().contains(&format!("guard :: {guard} ()")),
+                    "expected guard {guard} for verb {verb}, got: {tokens}"
+                );
+            }
+        }
+
+        #[test]
         fn use_scope_false_mounts_under_an_empty_scope() {
             let routes = vec![route("/equipments", "find", "", "GET")];
 
@@ -751,7 +790,53 @@ mod tests {
                         .service(
                             actix_web::web::resource("")
                                 .name("/equipments")
-                                .route(actix_web::web::get().to(find))
+                                .guard(actix_web::guard::Get())
+                                .to(find)
+                        )
+                );
+            };
+
+            assert_eq!(tokens.to_string(), expected.to_string());
+        }
+
+        #[test]
+        fn declaration_order_is_preserved_even_when_an_earlier_dynamic_path_reappears_later() {
+            // Regression test: a naive "group handlers by path" strategy would move every
+            // verb registered under a path to that path's *first* declaration point. Here,
+            // `find_one` (GET "/{uuid}") is declared before `update_me` (PUT "/me"), so grouping
+            // by path would register the PUT-guarded "/{uuid}" resource (from `update`, declared
+            // after `update_me`) ahead of "/me" — letting "/{uuid}" swallow "me" as its dynamic
+            // segment before Actix ever tries the more specific static "/me" route, since both
+            // are guarded on the same verb, PUT, so there's no guard mismatch to fall through on.
+            // Declaration order must be preserved exactly as-is, with no path-based grouping.
+            let routes = vec![
+                route("/users", "find_one", "/{uuid}", "GET"),
+                route("/users", "update_me", "/me", "PUT"),
+                route("/users", "update", "/{uuid}", "PUT"),
+            ];
+
+            let tokens = build_scope_service_tokens(routes, "/users", true);
+
+            let expected = quote! {
+                cfg.service(
+                    actix_web::web::scope("/users")
+                        .service(
+                            actix_web::web::resource("/{uuid}")
+                                .name("/users/{uuid}")
+                                .guard(actix_web::guard::Get())
+                                .to(find_one)
+                        )
+                        .service(
+                            actix_web::web::resource("/me")
+                                .name("/users/me")
+                                .guard(actix_web::guard::Put())
+                                .to(update_me)
+                        )
+                        .service(
+                            actix_web::web::resource("/{uuid}")
+                                .name("/users/{uuid}")
+                                .guard(actix_web::guard::Put())
+                                .to(update)
                         )
                 );
             };

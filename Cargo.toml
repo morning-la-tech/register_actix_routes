@@ -1,7 +1,7 @@
 [package]
 edition = "2024"
 name    = "register-actix-routes"
-version = "1.0.1"
+version = "1.0.2"
 license = "MIT"
 description = "Macro designed to simplify the registration of routes in an Actix Web application"
 
