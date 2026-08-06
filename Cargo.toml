@@ -1,7 +1,7 @@
 [package]
-edition = "2021"
+edition = "2024"
 name    = "register-actix-routes"
-version = "0.1.1"
+version = "1.0.0"
 license = "MIT"
 description = "Macro designed to simplify the registration of routes in an Actix Web application"
 
@@ -9,8 +9,7 @@ description = "Macro designed to simplify the registration of routes in an Actix
 once_cell   = "1.20.2"
 proc-macro2 = "1.0.89"
 quote       = "1.0.37"
-syn         = { version = "2.0.87", features = ["full"] }
-tabled      = "0.17.0"
+syn         = { version = "3.0.3", features = ["full"] }
 
 [lib]
 proc-macro = true

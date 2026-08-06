@@ -21,8 +21,8 @@
 5. **Error Handling and Debugging**:
     - Provides detailed error messages if routes are misconfigured or missing attributes.
 
-6. **Customizable Tabled Output**:
-    - Display all routes in a clean, tabular format using the `tabled` crate.
+6. **Tabular Output, No Extra Dependency**:
+    - Display all routes in a clean, tabular format with zero additional dependencies required.
 
 ---
 
@@ -33,7 +33,6 @@ Add the `register_routes` crate to your project:
 ```toml
 [dependencies]
 register_routes = "0.1.1"
-tabled = "0.17.0" # Required for route listing
 ```
 
 ---
@@ -82,11 +81,21 @@ This will generate a `register_service` function like:
 pub fn register_service(cfg: &mut actix_web::web::ServiceConfig) {
     cfg.service(
         actix_web::web::scope("")
-            .service(search)
-            .service(create)
+            .service(
+                actix_web::web::resource("/search")
+                    .name("/events/search")
+                    .route(actix_web::web::get().to(search))
+            )
+            .service(
+                actix_web::web::resource("/create")
+                    .name("/events/create")
+                    .route(actix_web::web::post().to(create))
+            )
     );
 }
 ```
+
+Handlers that share the exact same path (e.g. a `#[get("")]` "list" handler and a `#[post("")]` "create" handler on the same collection endpoint) are merged into a single named resource with one `.route(...)` per HTTP verb, instead of being registered as two separate services. This is what keeps `HttpRequest::match_name()` — and anything logging or monitoring off of it — accurate: Actix resolves that name purely by URL path, so two services sharing a path would otherwise make the one registered first "win" the name for every verb hitting that path.
 
 If you need the scope created with the path:
 
@@ -102,8 +111,16 @@ This will generate a `register_service` function like:
 pub fn register_service(cfg: &mut actix_web::web::ServiceConfig) {
     cfg.service(
         actix_web::web::scope("/events")
-            .service(search)
-            .service(create)
+            .service(
+                actix_web::web::resource("/search")
+                    .name("/events/search")
+                    .route(actix_web::web::get().to(search))
+            )
+            .service(
+                actix_web::web::resource("/create")
+                    .name("/events/create")
+                    .route(actix_web::web::post().to(create))
+            )
     );
 }
 ```
@@ -212,8 +229,11 @@ HttpServer::new(|| {
 1. **Actix-Specific**:
     - The macros rely on Actix Web’s routing macros and are not compatible with other frameworks.
 
-2. **Requires `tabled`**:
-    - The route listing feature depends on the `tabled` crate for pretty output.
+2. **Plain Text Table**:
+    - The route listing feature prints a simple, fixed-width ASCII table (no styling customization).
+
+3. **Only the route path is read from `#[get(...)]`/`#[post(...)]`, etc.**:
+    - `auto_register` only extracts the path literal from the underlying Actix route attribute, then removes that attribute entirely (handlers sharing the same path across different HTTP verbs are merged into a single named `actix_web::web::resource(...)`, each verb becoming a `.route(...)` on it — this is what keeps `HttpRequest::match_name()` accurate). Any extra arguments on that attribute (`guard = "..."`, `wrap = "..."`, `name = "..."`) are silently dropped. If you need those, register that specific route manually instead of through `auto_register`.
 
 ---
 
