@@ -259,6 +259,8 @@ fn generate_list_routes_impl(registry: &Registry) -> proc_macro2::TokenStream {
         }
     }
 
+    let wrap_cell_tokens = wrap_cell_fn_tokens();
+
     quote! {
         pub fn list_routes() {
             struct Route {
@@ -272,6 +274,10 @@ fn generate_list_routes_impl(registry: &Registry) -> proc_macro2::TokenStream {
                 #(#rows),*
             ];
 
+            const MAX_CELL_WIDTH: usize = 30;
+
+            #wrap_cell_tokens
+
             let headers = ["Scope", "Path", "Handler", "Verb"];
             let mut widths = [
                 headers[0].len(),
@@ -280,10 +286,10 @@ fn generate_list_routes_impl(registry: &Registry) -> proc_macro2::TokenStream {
                 headers[3].len(),
             ];
             for route in &routes {
-                widths[0] = widths[0].max(route.scope.len());
-                widths[1] = widths[1].max(route.path.len());
-                widths[2] = widths[2].max(route.handler.len());
-                widths[3] = widths[3].max(route.verb.len());
+                widths[0] = widths[0].max(route.scope.chars().count().min(MAX_CELL_WIDTH));
+                widths[1] = widths[1].max(route.path.chars().count().min(MAX_CELL_WIDTH));
+                widths[2] = widths[2].max(route.handler.chars().count().min(MAX_CELL_WIDTH));
+                widths[3] = widths[3].max(route.verb.chars().count().min(MAX_CELL_WIDTH));
             }
 
             fn separator(widths: &[usize; 4]) -> String {
@@ -295,35 +301,111 @@ fn generate_list_routes_impl(registry: &Registry) -> proc_macro2::TokenStream {
                 line
             }
 
-            fn row(cells: [&str; 4], widths: &[usize; 4]) -> String {
-                let mut line = String::from("|");
-                for (cell, width) in cells.iter().zip(widths.iter()) {
-                    line.push_str(&format!(" {:<width$} |", cell, width = width));
-                }
-                line
+            fn row_lines(cells: [&str; 4], widths: &[usize; 4]) -> Vec<String> {
+                let wrapped: [Vec<String>; 4] = [
+                    wrap_cell(cells[0], widths[0]),
+                    wrap_cell(cells[1], widths[1]),
+                    wrap_cell(cells[2], widths[2]),
+                    wrap_cell(cells[3], widths[3]),
+                ];
+                let sublines = wrapped.iter().map(Vec::len).max().unwrap_or(1);
+                (0..sublines)
+                    .map(|i| {
+                        let mut line = String::from("|");
+                        for (cell_lines, width) in wrapped.iter().zip(widths.iter()) {
+                            let text = cell_lines.get(i).map(String::as_str).unwrap_or("");
+                            line.push_str(&format!(" {:<width$} |", text, width = width));
+                        }
+                        line
+                    })
+                    .collect()
             }
 
             let separator = separator(&widths);
 
             println!("List of the automatically registered routes:");
             println!("{}", separator);
-            println!("{}", row(headers, &widths));
-            println!("{}", separator);
-            for route in &routes {
-                println!(
-                    "{}",
-                    row(
-                        [
-                            route.scope.as_str(),
-                            route.path.as_str(),
-                            route.handler.as_str(),
-                            route.verb.as_str(),
-                        ],
-                        &widths,
-                    )
-                );
+            for line in row_lines(headers, &widths) {
+                println!("{}", line);
             }
             println!("{}", separator);
+            for route in &routes {
+                for line in row_lines(
+                    [
+                        route.scope.as_str(),
+                        route.path.as_str(),
+                        route.handler.as_str(),
+                        route.verb.as_str(),
+                    ],
+                    &widths,
+                ) {
+                    println!("{}", line);
+                }
+            }
+            println!("{}", separator);
+        }
+    }
+}
+
+/// Word-wraps a single table cell to `max_width`, preferring to break right after the last `/`
+/// or `_` within the budget so route paths and handler names split on a readable boundary
+/// instead of mid-segment.
+///
+/// This exact logic is duplicated (not called) inside the `quote!` block above: the generated
+/// `list_routes` function runs in the *caller's* crate at their runtime, so it needs its own
+/// copy of the algorithm rather than a reference to this one. Keep both in sync.
+///
+/// Only exists for `wrap_cell_tests` to exercise directly; production code goes through
+/// `wrap_cell_fn_tokens` instead, hence `cfg(test)`.
+#[cfg(test)]
+fn wrap_cell(text: &str, max_width: usize) -> Vec<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max_width || max_width == 0 {
+        return vec![text.to_string()];
+    }
+
+    let mut lines = Vec::new();
+    let mut start = 0;
+    while chars.len() - start > max_width {
+        let window = &chars[start..start + max_width];
+        let break_at = window
+            .iter()
+            .rposition(|&c| c == '/' || c == '_')
+            .map(|i| i + 1)
+            .unwrap_or(max_width);
+        lines.push(chars[start..start + break_at].iter().collect());
+        start += break_at;
+    }
+    if start < chars.len() {
+        lines.push(chars[start..].iter().collect());
+    }
+    lines
+}
+
+fn wrap_cell_fn_tokens() -> proc_macro2::TokenStream {
+    quote! {
+        fn wrap_cell(text: &str, max_width: usize) -> Vec<String> {
+            let chars: Vec<char> = text.chars().collect();
+            if chars.len() <= max_width || max_width == 0 {
+                return vec![text.to_string()];
+            }
+
+            let mut lines = Vec::new();
+            let mut start = 0;
+            while chars.len() - start > max_width {
+                let window = &chars[start..start + max_width];
+                let break_at = window
+                    .iter()
+                    .rposition(|&c| c == '/' || c == '_')
+                    .map(|i| i + 1)
+                    .unwrap_or(max_width);
+                lines.push(chars[start..start + break_at].iter().collect());
+                start += break_at;
+            }
+            if start < chars.len() {
+                lines.push(chars[start..].iter().collect());
+            }
+            lines
         }
     }
 }
@@ -743,6 +825,88 @@ mod tests {
             let tokens = generate_list_routes_impl(&registry);
             let parsed: syn::Result<ItemFn> = syn::parse2(tokens);
             assert!(parsed.is_ok());
+        }
+
+        #[test]
+        fn embeds_a_wrap_cell_helper_matching_the_standalone_copy() {
+            let registry = fresh_registry();
+            let generated = generate_list_routes_impl(&registry);
+            let standalone = wrap_cell_fn_tokens();
+
+            assert!(
+                generated.to_string().contains(&standalone.to_string()),
+                "the copy of wrap_cell embedded in the generated code must stay in sync with \
+                the standalone one covered by wrap_cell_tests",
+            );
+        }
+    }
+
+    mod wrap_cell_tests {
+        use super::*;
+
+        #[test]
+        fn text_within_max_width_is_not_wrapped() {
+            assert_eq!(wrap_cell("short", 30), vec!["short".to_string()]);
+        }
+
+        #[test]
+        fn text_exactly_at_max_width_is_not_wrapped() {
+            assert_eq!(wrap_cell("exact", 5), vec!["exact".to_string()]);
+        }
+
+        #[test]
+        fn breaks_after_the_last_slash_within_budget() {
+            let wrapped = wrap_cell("/user_uuid/organizations/organization_uuid/suspend", 20);
+            assert_eq!(
+                wrapped,
+                vec![
+                    "/user_uuid/".to_string(),
+                    "organizations/".to_string(),
+                    "organization_uuid/".to_string(),
+                    "suspend".to_string(),
+                ]
+            );
+            assert!(wrapped.iter().all(|line| line.chars().count() <= 20));
+        }
+
+        #[test]
+        fn breaks_after_the_last_underscore_when_no_slash_is_available() {
+            let wrapped = wrap_cell("get_roles_organizations_of_user", 10);
+            assert!(wrapped.iter().all(|line| line.chars().count() <= 10));
+            assert_eq!(wrapped.concat(), "get_roles_organizations_of_user");
+        }
+
+        #[test]
+        fn hard_cuts_when_no_separator_is_available_within_budget() {
+            let wrapped = wrap_cell("abcdefghijklmnop", 4);
+            assert_eq!(
+                wrapped,
+                vec!["abcd".to_string(), "efgh".to_string(), "ijkl".to_string(), "mnop".to_string()]
+            );
+        }
+
+        #[test]
+        fn max_width_zero_falls_back_to_a_single_line() {
+            assert_eq!(wrap_cell("anything", 0), vec!["anything".to_string()]);
+        }
+
+        #[test]
+        fn empty_text_yields_a_single_empty_line() {
+            assert_eq!(wrap_cell("", 10), vec!["".to_string()]);
+        }
+
+        #[test]
+        fn is_safe_on_multi_byte_utf8_content() {
+            let wrapped = wrap_cell("café/du_matin/à_paris", 6);
+            assert!(wrapped.iter().all(|line| line.chars().count() <= 6));
+            assert_eq!(wrapped.concat(), "café/du_matin/à_paris");
+        }
+
+        #[test]
+        fn reassembling_wrapped_lines_reproduces_the_original_text() {
+            let original = "/{user_uuid}/organizations/{organization_uuid}/suspend";
+            let wrapped = wrap_cell(original, 15);
+            assert_eq!(wrapped.concat(), original);
         }
     }
 }

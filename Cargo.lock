@@ -28,7 +28,7 @@ dependencies = [
 
 [[package]]
 name = "register-actix-routes"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "once_cell",
  "proc-macro2",
